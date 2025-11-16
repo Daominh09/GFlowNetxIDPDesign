@@ -1,14 +1,17 @@
 name: GFNxIDP
 channels:
+  - bioconda
+  - conda-forge
+  - pytorch
   - defaults
 dependencies:
   - python=3.10
-  - joblib
-  - pandas
-  - mdanalysis
-  - numba
-  - scikit-learn==1.6
-  - matplotlib
   - numpy=1.26.4
+  - pandas
+  - matplotlib
+  - numba
+  - scikit-learn=1.2.2
+  - mdanalysis
   - pytorch
-prefix: /opt/anaconda3/envs/GFNxIDP
+  - blast
+

@@ -9,7 +9,7 @@ import gzip
 
 from lib.dataset import get_dataset
 from lib.generator import get_generator
-from lib.oracle import get_oracle
+from lib.oracle import get_oracle, ProtVec
 from lib.proxy import get_proxy
 from lib.tokenizer import get_tokenizer
 from lib.args import get_default_args
@@ -341,7 +341,7 @@ def main(args):
     torch.manual_seed(args.seed)
     torch.set_default_dtype(torch.float32)
     np.random.seed(args.seed)
-    args.device = torch.device('mps')
+    args.device = torch.device('cpu')
     tokenizer = get_tokenizer(args)
     oracle = get_oracle(args, tokenizer)
     dataset = get_dataset(args, tokenizer)

@@ -14,8 +14,8 @@ def get_default_args():
     parser = argparse.ArgumentParser()
     
     # Dataset
-    parser.add_argument('--train_path', type=str, default='lib/data/train_dataset.csv')
-    parser.add_argument('--test_path', type=str, default='lib/data/test_dataset.csv')
+    parser.add_argument('--train_path', type=str, default='lib/data/dataset_filtered.csv')
+    parser.add_argument('--test_path', type=str, default='lib/data/dataset.csv')
     parser.add_argument('--test_size', type=int, default=0.1)
     parser.add_argument('--seed', type=int, default=42)
     
@@ -40,8 +40,6 @@ def get_default_args():
     parser.add_argument('--gen_num_iterations', type=float, default=1000)
     parser.add_argument('--num_sampled_per_round', type=float, default=128)
     parser.add_argument('--num_rounds', type=float, default=6)
-    parser.add_argument('--use_substructure_guide', action="store_true")
-    parser.add_argument('--target_mix_backpolicy_weight', type=float, default=0.9)
 
     # Oracle
     parser.add_argument('--dg_file', type=str, default='lib/models/oracle_models/dg/model_dG.joblib')
@@ -67,11 +65,13 @@ def get_default_args():
     parser.add_argument('--proxy_num_per_minibatch', type=float, default=256)
     parser.add_argument('--proxy_early_stop_to_best_params', type=int, default=0)
     parser.add_argument('--proxy_num_dropout_samples', type=int, default=25)
-    parser.add_argument("--proxy_mode", type=str, default="range", choices=["ucb", "gaussian", "interval", "laplace", "range"])
+    parser.add_argument('--proxy_mode', type=str, default='direct', choices=['gaussian', 'range', 'direct'])
     parser.add_argument('--target_dg_low', type=float, default=-7.0, help='Lower bound of target ΔG range')
     parser.add_argument('--target_dg_high', type=float, default=-6.0, help='Upper bound of target ΔG range')
     parser.add_argument('--preference_direction', type=int, default=0, choices=[-1, 0, 1], help='Preference within range: -1=lower, 0=no preference, 1=higher')
     parser.add_argument('--reward_lambda', type=float, default=1.0, help='Decay rate for out-of-range penalties (like λ in A-GFN)')
+    parser.add_argument('--reward_min_clip', type=float, default=1e-6)
+    parser.add_argument('--reward_max_clip', type=float, default=1.0)
 
 
     parser.add_argument('--save_path', type=str, default='lib/results/training_log.json')
