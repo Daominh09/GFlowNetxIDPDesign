@@ -38,33 +38,7 @@ dist/
 # ------------------------------
 .ipynb_checkpoints/
 
-# ------------------------------
-# Project-specific directories
-# ------------------------------
 
-# Local datasets (user-specific, too large for git)
-datasets/
-datasets/*
-
-# Logs, checkpoints, experiment outputs
-logs/
-logs/*
-checkpoints/
-outputs/
-results/
-
-# Training logs saved by the project
-*.json
-*.csv
-
-# ------------------------------
-# Tools/models (large external data)
-# Keep the folder structure but ignore file contents
-# ------------------------------
-
-src/gfnxidp/tools/data/*
-src/gfnxidp/tools/Embeddings/*
-src/gfnxidp/tools/Models/*
 
 # Allow __init__ so the folders remain importable
 !src/gfnxidp/tools/data/__init__.py
