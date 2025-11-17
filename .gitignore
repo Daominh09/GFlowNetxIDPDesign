@@ -1,0 +1,98 @@
+# ------------------------------
+# Python cache & compiled files
+# ------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Byte-compiled / optimized / DLL files
+*.sqlite3
+*.log
+
+# ------------------------------
+# Virtual environments
+# ------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# Conda environment backup
+*.conda
+*.yml~
+environment.lock
+conda-meta/
+
+# ------------------------------
+# Build artifacts
+# ------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ------------------------------
+# Jupyter
+# ------------------------------
+.ipynb_checkpoints/
+
+# ------------------------------
+# Project-specific directories
+# ------------------------------
+
+# Local datasets (user-specific, too large for git)
+datasets/
+datasets/*
+
+# Logs, checkpoints, experiment outputs
+logs/
+logs/*
+checkpoints/
+outputs/
+results/
+
+# Training logs saved by the project
+*.json
+*.csv
+
+# ------------------------------
+# Tools/models (large external data)
+# Keep the folder structure but ignore file contents
+# ------------------------------
+
+src/gfnxidp/tools/data/*
+src/gfnxidp/tools/Embeddings/*
+src/gfnxidp/tools/Models/*
+
+# Allow __init__ so the folders remain importable
+!src/gfnxidp/tools/data/__init__.py
+!src/gfnxidp/tools/Embeddings/__init__.py
+!src/gfnxidp/tools/Models/__init__.py
+
+# Ignore iupred intermediate files
+src/gfnxidp/tools/*.tmp
+src/gfnxidp/tools/*.out
+
+# ------------------------------
+# IDE / Editor
+# ------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ------------------------------
+# System files
+# ------------------------------
+.DS_Store
+Thumbs.db
+
+# ------------------------------
+# Slurm / HPC
+# ------------------------------
+slurm-*.out
+slurm-*.err
+*.o*
+*.e*
