@@ -35,8 +35,8 @@ class MLP(nn.Module):
     def forward(self, x, mask, return_all=False, lens=None):
         if return_all:
             outputs = []
-            for i in range(lens[0]):
-                mask = torch.cat((torch.ones(x.shape[0], self.num_tokens * i), torch.zeros(x.shape[0], self.num_tokens * (lens[0] - i))), axis=1)
+            for i in range(self.max_len):
+                mask = torch.cat((torch.ones(x.shape[0], self.num_tokens * i), torch.zeros(x.shape[0], self.num_tokens * (self.max_len - i))), axis=1)
                 mask = mask.to(x.device)
                 masked_input = mask * x
                 out = self.input(masked_input)
@@ -59,7 +59,7 @@ class TBGFlowNetGenerator(nn.Module):
         self.loss_eps = torch.tensor(float(args.gen_loss_eps)).to(args.device)
         self.pad_tok = 1
         self.num_tokens = args.vocab_size
-        self.max_len = args.gen_max_len
+        self.max_len = args.max_len
         self.tokenizer=tokenizer
         self.model = MLP(num_tokens=self.num_tokens, 
                                 num_outputs=self.num_tokens, 

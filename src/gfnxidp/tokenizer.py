@@ -10,9 +10,10 @@ class Vocab:
             self.itos[i] = alphabet
 
 class TokenizerWrapper:
-    def __init__(self, vocab):
+    def __init__(self, vocab, args):
+        self.args = args
         self.vocab = vocab
-    
+        self.vocab_size = len(vocab.alphabet)
     def tokenize(self, seq):
         tokens = []
         for aa in seq:
@@ -35,6 +36,7 @@ class TokenizerWrapper:
         lens = [len(batch_tokens[i]) for i in range(len(batch_tokens))]
         max_len = max(lens)
         if max_len != sum(lens) / len(lens):
+            max_len = self.args.max_len
             for i in range(len(batch_tokens)):
                 if len(batch_tokens[i]) == max_len:
                     pass
@@ -58,5 +60,5 @@ class TokenizerWrapper:
 def get_tokenizer(args):
     alphabet = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
     vocab = Vocab(alphabet)
-    tokenizer = TokenizerWrapper(vocab)
+    tokenizer = TokenizerWrapper(vocab, args)
     return tokenizer

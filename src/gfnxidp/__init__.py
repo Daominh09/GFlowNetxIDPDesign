@@ -10,7 +10,7 @@ from .generator import get_generator
 from .oracle import ProtVec, get_oracle
 from .dataset import IDPDataset, get_dataset
 from .tokenizer import get_tokenizer
-from .proxy import get_proxy
+from .proxy import get_proxy, IDPConstraintPenalty
 from . import utils
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "get_tokenizer",
     "get_proxy",
     "utils",
+    "IDPConstraintPenalty"
 ]
 
 __version__ = "0.1.0"

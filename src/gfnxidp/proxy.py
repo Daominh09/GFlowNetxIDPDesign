@@ -5,6 +5,7 @@ from tqdm import tqdm
 import numpy as np
 
 from gfnxidp.generator import MLP
+from typing import List, Optional, Tuple
 
 class DropoutRegressor(nn.Module):
     def __init__(self, args, tokenizer):
@@ -508,6 +509,217 @@ class DirectRewardProxy:
         r = self.shaper.from_score(mean, std=std, iteration=iteration)
         
         return r
+    
+class IDPConstraintPenalty:
+    """
+    Applies biophysical constraint penalties for IDP design.
+    All penalties are multiplicative factors in (0, 1].
+    """
+    def __init__(self, args, tokenizer):
+        self.args = args
+        self.tokenizer = tokenizer
+        self.device = args.device
+        
+        # Constraint thresholds (configurable via args)
+        self.cys_max_fraction = getattr(args, 'cys_max_fraction', 0.03)
+        self.hydrophobic_max_fraction = getattr(args, 'hydrophobic_max_fraction', 0.35)
+        self.aromatic_min_fraction = getattr(args, 'aromatic_min_fraction', 0.08)
+        self.aromatic_max_fraction = getattr(args, 'aromatic_max_fraction', 0.12)
+        self.min_disorder_score = getattr(args, 'min_disorder_score', 0.65)
+        self.max_ordered_stretch = getattr(args, 'max_ordered_stretch', 15)
+        
+        # Penalty strengths (how harsh the penalty is)
+        self.cys_penalty_strength = getattr(args, 'cys_penalty_strength', 10.0)
+        self.hydrophobic_penalty_strength = getattr(args, 'hydrophobic_penalty_strength', 10.0)
+        self.aromatic_penalty_strength = getattr(args, 'aromatic_penalty_strength', 10.0)
+        self.disorder_penalty_strength = getattr(args, 'disorder_penalty_strength', 5.0)
+        
+        # Amino acid groups
+        self.hydrophobic_aa = set('AILMFWVY')
+        self.aromatic_aa = set('FWY')
+        self.cysteine = 'C'
+        
+        # Optional: IUPred2A path for disorder prediction
+        self.iupred_path = getattr(args, 'iupred2a', None)
+        self.use_disorder_filter = getattr(args, 'use_disorder_filter', False)
+        
+        self._print_config()
+    
+    def _print_config(self):
+        print(f"\n{'='*60}")
+        print("IDP Constraint Penalties Initialized:")
+        print(f"  Cysteine: max {self.cys_max_fraction*100:.1f}% (penalty strength: {self.cys_penalty_strength})")
+        print(f"  Hydrophobic: max {self.hydrophobic_max_fraction*100:.1f}% (penalty strength: {self.hydrophobic_penalty_strength})")
+        print(f"  Aromatic: {self.aromatic_min_fraction*100:.1f}%-{self.aromatic_max_fraction*100:.1f}% (penalty strength: {self.aromatic_penalty_strength})")
+        if self.use_disorder_filter:
+            print(f"  Disorder: min score {self.min_disorder_score}, max ordered stretch {self.max_ordered_stretch}")
+        print(f"{'='*60}\n")
+    
+    def compute_cysteine_penalty(self, seq: str) -> float:
+        """Penalty if cysteine fraction > threshold"""
+        if len(seq) == 0:
+            return 1.0
+        cys_frac = seq.count(self.cysteine) / len(seq)
+        if cys_frac <= self.cys_max_fraction:
+            return 1.0
+        excess = cys_frac - self.cys_max_fraction
+        return np.exp(-self.cys_penalty_strength * excess)
+    
+    def compute_hydrophobic_penalty(self, seq: str) -> float:
+        """Penalty if hydrophobic fraction > threshold"""
+        if len(seq) == 0:
+            return 1.0
+        hydro_count = sum(1 for aa in seq if aa in self.hydrophobic_aa)
+        hydro_frac = hydro_count / len(seq)
+        if hydro_frac <= self.hydrophobic_max_fraction:
+            return 1.0
+        excess = hydro_frac - self.hydrophobic_max_fraction
+        return np.exp(-self.hydrophobic_penalty_strength * excess)
+    
+    def compute_aromatic_penalty(self, seq: str) -> float:
+        """Penalty if aromatic fraction outside [min, max] range"""
+        if len(seq) == 0:
+            return 1.0
+        arom_count = sum(1 for aa in seq if aa in self.aromatic_aa)
+        arom_frac = arom_count / len(seq)
+        
+        if self.aromatic_min_fraction <= arom_frac <= self.aromatic_max_fraction:
+            return 1.0
+        
+        if arom_frac < self.aromatic_min_fraction:
+            deficit = self.aromatic_min_fraction - arom_frac
+        else:
+            deficit = arom_frac - self.aromatic_max_fraction
+        return np.exp(-self.aromatic_penalty_strength * deficit)
+    
+    def compute_disorder_penalty(self, seq: str) -> float:
+        """
+        Penalty based on predicted disorder score.
+        Requires IUPred2A to be available.
+        """
+        if not self.use_disorder_filter or self.iupred_path is None:
+            return 1.0
+        
+        try:
+            disorder_scores = self._predict_disorder(seq)
+            if disorder_scores is None:
+                return 1.0
+            
+            # Penalty for low average disorder
+            avg_disorder = np.mean(disorder_scores)
+            if avg_disorder < self.min_disorder_score:
+                deficit = self.min_disorder_score - avg_disorder
+                avg_penalty = np.exp(-self.disorder_penalty_strength * deficit)
+            else:
+                avg_penalty = 1.0
+            
+            return avg_penalty
+            
+        except Exception as e:
+            print(f"Disorder prediction failed: {e}")
+            return 1.0
+    
+    def _predict_disorder(self, seq: str) -> Optional[np.ndarray]:
+        """Run IUPred2A to get per-residue disorder scores"""
+        import tempfile
+        import subprocess
+        import os
+        
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.fasta')
+        try:
+            with open(tmp.name, 'w') as f:
+                f.write(f'>seq\n{seq}')
+            
+            result = subprocess.run(
+                ['python', self.iupred_path, tmp.name, 'long'],
+                capture_output=True, text=True, timeout=30
+            )
+            
+            lines = result.stdout.strip().split('\n')
+            scores = []
+            for line in lines:
+                if line.startswith('#') or not line.strip():
+                    continue
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        scores.append(float(parts[2]))
+                    except ValueError:
+                        continue
+            return np.array(scores) if scores else None
+            
+        finally:
+            os.unlink(tmp.name)
+    
+    
+    def compute_total_penalty(self, seq: str) -> Tuple[float, dict]:
+        """
+        Compute combined penalty from all constraints.
+        Returns (total_penalty, breakdown_dict)
+        """
+        cys_p = self.compute_cysteine_penalty(seq)
+        hydro_p = self.compute_hydrophobic_penalty(seq)
+        arom_p = self.compute_aromatic_penalty(seq)
+        disorder_p = self.compute_disorder_penalty(seq)
+
+        total = cys_p * hydro_p * arom_p * disorder_p
+        
+        breakdown = {
+            'cysteine': cys_p,
+            'hydrophobic': hydro_p,
+            'aromatic': arom_p,
+            'disorder': disorder_p,
+            'total': total
+        }
+        return total, breakdown
+    
+    def batch_penalties(self, sequences: List[str]) -> torch.Tensor:
+        """Compute penalties for a batch of sequences"""
+        penalties = [self.compute_total_penalty(seq)[0] for seq in sequences]
+        return torch.tensor(penalties, device=self.device, dtype=torch.float32)
+
+
+class ConstrainedRewardShaper:
+    """
+    Wrapper that applies constraint penalties to any base reward shaper.
+    final_reward = base_reward * constraint_penalty
+    """
+    def __init__(self, base_shaper, constraint_penalty: IDPConstraintPenalty, tokenizer):
+        self.base_shaper = base_shaper
+        self.constraint_penalty = constraint_penalty
+        self.tokenizer = tokenizer
+        self.device = base_shaper.device
+        
+        # Expose base shaper attributes
+        self.reward_exp = getattr(base_shaper, 'reward_exp', 1.0)
+        self.reward_exp_ramping = getattr(base_shaper, 'reward_exp_ramping', 0.0)
+    
+    def from_score(self, s, std=None, iteration=0, sequences=None):
+        """Apply base reward + constraint penalties"""
+        base_reward = self.base_shaper.from_score(s, std, iteration)
+        
+        if sequences is not None:
+            penalties = self.constraint_penalty.batch_penalties(sequences)
+            return base_reward * penalties
+        return base_reward
+    
+    def from_label(self, y, already_normalized=None, iteration=0, sequences=None):
+        """Apply base reward + constraint penalties"""
+        base_reward = self.base_shaper.from_label(y, already_normalized, iteration)
+        
+        if sequences is not None:
+            penalties = self.constraint_penalty.batch_penalties(sequences)
+            return base_reward * penalties
+        return base_reward
+    
+    def from_label_with_tokens(self, y, tokens_list, already_normalized=None, iteration=0):
+        """
+        Convenience method when you have tokens instead of sequences.
+        Converts tokens to sequences and applies penalties.
+        """
+        sequences = [self.tokenizer.detokenize(tokens) for tokens in tokens_list]
+        return self.from_label(y, already_normalized, iteration, sequences)
+
 
 def _safe_tensor(x, device, dtype=torch.float32):
     """Convert various types to torch tensor safely"""

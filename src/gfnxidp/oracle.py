@@ -14,6 +14,7 @@ from sklearn.ensemble import RandomForestClassifier
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
 from Bio.SeqUtils.IsoelectricPoint import IsoelectricPoint as IP
 from gensim.models import word2vec
+from gfnxidp.utils import X_from_seq, Model, AttrSetter
 
 import warnings
 from Bio import BiopythonDeprecationWarning
@@ -268,7 +269,7 @@ def compute_deephase_score(seq, pv, phys_model, w2v_model, iupred):
     
     return deephase_score
 
-class IDPOracle:
+class DeeScoreOracle:
     def __init__(self, args, tokenizer):
         self.tokenizer = tokenizer
         
@@ -296,45 +297,65 @@ class IDPOracle:
         
         return np.array(scores, dtype=np.float32)
     
+class IDPOracle:
+    def __init__(self, args, tokenizer):
+        """
+        Unified Oracle class for both DG and CSAT predictions.
+        
+        Args:
+            args: Configuration arguments
+            tokenizer: Tokenizer for sequence processing
+            model_type: Type of model to use ('dg' or 'csat')
+        """
+        self.model_type = args.oracle_mode
+        self.tokenizer = tokenizer
+        self.charge_termini = args.charge_termini
+        self.temperature = args.temperature
+        self.ionic_strength = args.ionic_strength
+        self.nu_model = args.nu_model
+        self.residues = pd.read_csv(args.residues_file).set_index('one')
+        self.feature = ['mean_lambda', 'faro', 'shd', 'ncpr', 'fcr', 'scd', 'ah_ij', 'nu_svr']
+        
+        # Set model file and target based on type
+        if self.model_type == 'dg':
+            self.model_file = args.dg_model
+            self.target = 'dg'
+        elif self.model_type == 'csat':
+            self.model_file = args.csat_model
+            self.target = 'logcdil_mgml'
+        else:
+            raise ValueError(f"Unknown model_type: {self.model_type}. Use 'dg' or 'csat'.")
+        
+        self.model = self.load_model()
+        
+    def load_model(self):
+        """Load the appropriate model based on model_type."""
+        return joblib.load(self.model_file)
+    
+    def predict(self, tokens):
+        """Predict for a single sequence."""
+        seq = self.tokenizer.detokenize(tokens)
+        X = X_from_seq(seq, self.feature, residues=self.residues, 
+                       charge_termini=self.charge_termini, nu_file=self.nu_model)
+        pred = self.model.predict(X)
+        mean_pred = np.mean(pred)
+        return np.float32(mean_pred)
+    
+    def batch_predict(self, batch_tokens):
+        """Predict for a batch of sequences."""
+        seqs = [self.tokenizer.detokenize(tokens) for tokens in batch_tokens]
+        output = []
+        for seq in seqs:
+            X = X_from_seq(seq, self.feature, residues=self.residues,
+                          charge_termini=self.charge_termini, nu_file=self.nu_model)
+            pred = self.model.predict(X)
+            mean_pred = np.mean(pred)
+            output.append(mean_pred)
+        return np.float32(output)
+    
+
 def get_oracle(args, tokenizer):
-    return IDPOracle(args, tokenizer)
-
-
-# Test code
-if __name__ == "__main__":
-    import argparse
-    from tokenizer import get_tokenizer
-    from args import get_default_args
-    
-    print("="*60)
-    print("Testing DeePhase Oracle")
-    print("="*60)
-    
-    # Create mock args
-    args = get_default_args()
-    
-    # Get tokenizer
-    tokenizer = get_tokenizer(args)
-    
-    # Create oracle
-    oracle = IDPOracle(args, tokenizer)
-    
-    # Test sequences
-    test_seqs = [
-        'MEVEQEQRRRKVEAGRTKLAHFRQRKTKGDSSHSEKKTAKRKGSAVDASVQEESPVTKEDSALCGGGDICKSTSCDDTPDGAGGAFAAQPEDCDGEKREDLEQLQQKQVNDHPPEQCGMFTVSDHPPEQHGMFTVGDHPPEQRGMFTVSDHPPEQHGMFTVSDHPPEQRGMFTISDHQPEQRGMFTVSDHTPEQRGIFTISDHPAEQRGMFTKECEQECELAITDLESGREDEAGLHQSQAVHGLELEALRLSLSNMHTAQLELTQANLQKEKETALTELREMLNSRRAQELALLQSRQQHELELLREQHAREKEEVVLRCGQEAAELKEKLQSEMEKNAQIVKTLKEDWESEKDLCLENLRKELSAKHQSEMEDLQNQFQKELAEQRAELEKIFQDKNQAERALRNLESHHQAAIEKLREDLQSEHGRCLEDLEFKFKESEKEKQLELENLQASYEDLKAQSQEEIRRLWSQLDSARTSRQELSELHEQLLARTSRVEDLEQLKQREKTQHESELEQLRIYFEKKLRDAEKTYQEDLTLLQQRLQGAREDALLDSVEVGLSCVGLEEKPEKGRKDHVDELEPERHKESLPRFQAELEESHRHQLEALESPLCIQHEGHVSDRCCVETSALGHEWRLEPSEGHSQELPWVHLQGVQDGDLEADTERAARVLGLETEHKVQLSLLQTELKEEIELLKIENRNLYGKLQHETRLKDDLEKVKHNLIEDHQKELNNAKQKTELMKQEFQRKETDWKVMKEELQREAEEKLTLMLLELREKAESEKQTIINKFELREAEMRQLQDQQAAQILDLERSLTEQQGRLQQLEQDLTSDDALHCSQCGREPPTAQDGELAALHVKEDCALQLMLARSRFLEERKEITEKFSAEQDAFLQEAQEQHARELQLLQERHQQQLLSVTAELEARHQAALGELTASLESKQGALLAARVAELQTKHAADLGALETRHLSSLDSLESCYLSEFQTIREEHRQALELLRADFEEQLWKKDSLHQTILTQELEKLKRKHEGELQSVRDHLRTEVSTELAGTVAHELQGVHQGEFGSEKKTALHEKEETLRLQSAQAQPFHQEEKESLSLQLQKKNHQVQQLKDQVLSLSHEIEECRSELEVLQQRRERENREGANLLSMLKADVNLSHSERGALQDALRRLLGLFGETLRAAVTLRSRIGERVGLCLDDAGAGLALSTAPALEETWSDVALPELDRTLSECAEMSSVAEISSHMRESFLMSPESVRECEQPIRRVFQSLSLAVDGLMEMALDSSRQLEEARQIHSRFEKEFSFKNEETAQVVRKHQELLECLKEESAAKAELALELHKTQGTLEGFKVETADLKEVLAGKEDSEHRLVLELESLRRQLQQAAQEQAALREECTRLWSRGEATATDAEAREAALRKEVEDLTKEQSETRKQAEKDRSALLSQMKILESELEEQLSQHRGCAKQAEAVTALEQQVASLDKHLRNQRQFMDEQAAEREHEREEFQQEIQRLEGQLRQAAKPQPWGPRDSQQAPLDGEVELLQQKLREKLDEFNELAIQKESADRQVLMQEEEIKRLEEMNINIRKKVAQLQEEVEKQKNIVKGLEQDKEVLKKQQMSSLLLASTLQSTLDAGRCPEPPSGSPPEGPEIQLEVTQRALLRRESEVLDLKEQLEKMKGDLESKNEEILHLNLKLDMQNSQTAVSLRELEEENTSLKVIYTRSSEIEELKATIENLQENQKRLQKEKAEEIEQLHEVIEKLQHELSLMGPVVHEVSDSQAGSLQSELLCSQAGGPRGQALQGELEAALEAKEALSRLLADQERRHSQALEALQQRLQGAEEAAELQLAELERNVALREAEVEDMASRIQEFEAALKAKEATIAERNLEIDALNQRKAAHSAELEAVLLALARIRRALEQQPLAAGAAPPELQWLRAQCARLSRQLQVLHQRFLRCQVELDRRQARRATAHTRVPGAHPQPRMDGGAKAQVTGDVEASHDAALEPVVPDPQGDLQPVLVTLKDAPLCKQEGVMSVLTVCQRQLQSELLLVKNEMRLSLEDGGKGKEKVLEDCQLPKVDLVAQVKQLQEKLNRLLYSMTFQNVDAADTKSLWPMASAHLLESSWSDDSCDGEEPDISPHIDTCDANTATGGVTDVIKNQAIDACDANTTPGGVTDVIKNWDSLIPDEMPDSPIQEKSECQDMSLSSPTSVLGGSRHQSHTAEAGPRKSPVGMLDLSSWSSPEVLRKDWTLEPWPSLPVTPHSGALSLCSADTSLGDRADTSLPQTQGPGLLCSPGVSAAALALQWAESPPADDHHVQRTAVEKDVEDFITTSFDSQETLSSPPPGLEGKADRSEKSDGSGFGARLSPGSGGPEAQTAGPVTPASISGRFQPLPEAMKEKEVRPKHVKALLQMVRDESHQILALSEGLAPPSGEPHPPRKEDEIQDISLHGGKTQEVPTACPDWRGDLLQVVQEAFEKEQEMQGVELQPRLSGSDLGGHSSLLERLEKIIREQGDLQEKSLEHLRLPDRSSLLSEIQALRAQLRMTHLQNQEKLQHLRTALTSAEARGSQQEHQLRRQVELLAYKVEQEKCIAGDLQKTLSEEQEKANSVQKLLAAEQTVVRDLKSDLCESRQKSEQLSRSLCEVQQEVLQLRSMLSSKENELKAALQELESEQGKGRALQSQLEEEQLRHLQRESQSAKALEELRASLETQRAQSSRLCVALKHEQTAKDNLQKELRIEHSRCEALLAQERSQLSELQKDLAAEKSRTLELSEALRHERLLTEQLSQRTQEACVHQDTQAHHALLQKLKEEKSRVVDLQAMLEKVQQQALHSQQQLEAEAQKHCEALRREKEVSATLKSTVEALHTQKRELRCSLEREREKPAWLQAELEQSHPRLKEQEGRKAARRSAEARQSPAAAEQWRKWQRDKEKLRELELQRQRDLHKIKQLQQTVRDLESKDEVPGSRLHLGSARRAAGSDADHLREQQRELEAMRQRLLSAARLLTSFTSQAVDRTVNDWTSSNEKAVMSLLHTLEELKSDLSRPTSSQKKMAAELQFQFVDVLLKDNVSLTKALSTVTQEKLELSRAVSKLEKLLKHHLQKGCSPSRSERSAWKPDETAPQSSLRRPDPGRLPPAASEEAHTSNVKMEKLYLHYLRAESFRKALIYQKKYLLLLIGGFQDSEQETLSMIAHLGVFPSKAERKITSRPFTRFRTAVRVVIAILRLRFLVKKWQEVDRKGALAQGKAPRPGPRARQPQSPPRTRESPPTRDVPSGHTRDPARGRRLAAAASPHSGGRATPSPNSRLERSLTASQDPEHSLTEYIHHLEVIQQRLGGVLPDSTSKKSCHPMIKQ',  # FUS fragment
-    ]
-    
-    print("\n--- Single Predictions ---\n")
-    for i, seq in enumerate(test_seqs):
-        tokens = tokenizer.tokenize(seq)
-        score = oracle.predict(tokens)
-        print(f"Seq {i+1} (len={len(seq)}): DeePhase = {score:.4f}")
-    
-    print("\n--- Batch Prediction ---\n")
-    batch_tokens = [tokenizer.tokenize(seq) for seq in test_seqs]
-    batch_scores = oracle.batch_predict(batch_tokens)
-    print(f"Batch scores: {batch_scores}")
-    print(f"Mean: {batch_scores.mean():.4f}, Std: {batch_scores.std():.4f}")
-    
-    print("\n" + "="*60)
-    print("Test completed!")
+    if args.oracle_mode == "deescore":
+        return DeeScoreOracle(args, tokenizer)
+    else:
+        return IDPOracle(args, tokenizer)

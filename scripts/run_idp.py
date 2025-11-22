@@ -6,9 +6,10 @@ from tqdm import tqdm
 from gfnxidp import get_dataset
 from gfnxidp import get_generator
 from gfnxidp import get_oracle, ProtVec
-from gfnxidp import get_proxy
+from gfnxidp import get_proxy, IDPConstraintPenalty
 from gfnxidp import get_tokenizer
 from gfnxidp import get_default_args
+from gfnxidp.utils import Model, AttrSetter
 
 
 import warnings
@@ -26,10 +27,13 @@ class MbStack:
         if not len(self.stack):
             return []
         with torch.no_grad():
-            ys = self.f([i[0] for i in self.stack]) # eos_tok == 2
+            ys = self.f.batch_predict([i[0] for i in self.stack]) # eos_tok == 2
         idxs = [i[1] for i in self.stack]
         self.stack = []
         return zip(ys, idxs)
+    
+
+
     
 class RolloutWorker:
     def __init__(self, args, oracle, tokenizer, reward_shaper=None):
@@ -52,6 +56,7 @@ class RolloutWorker:
         
         # Use reward shaper instead of l2r
         self.reward_shaper = reward_shaper
+        self.constraint_penalty = IDPConstraintPenalty(args, tokenizer)
 
     def rollout(self, model, episodes, use_rand_policy=True):
         visited = []
@@ -109,7 +114,13 @@ class RolloutWorker:
         # Process generated trajectories
         for (r, mbidx) in self.workers.pop_all():
             # r is the oracle score (normalized), convert to reward using shaper
-            reward = r
+            reward_tensor = torch.tensor(r, device=self.device, dtype=torch.float32)
+            base_reward = self.reward_shaper.from_label(reward_tensor, already_normalized=False)
+            seq = self.tokenizer.detokenize(states[mbidx])
+            penalty, breakdown = self.constraint_penalty.compute_total_penalty(seq)
+            reward = base_reward * penalty
+            if it % 100 == 0 and penalty < 0.9:
+                print(f"  Constraint penalty: {penalty:.3f} | {breakdown}")
             traj_rewards[mbidx][-1] = reward
             rq.append(r.item())
             s = states[mbidx]
@@ -120,16 +131,19 @@ class RolloutWorker:
         if args.gen_data_sample_per_step > 0 and dataset is not None:
             n = args.gen_data_sample_per_step
             m = len(traj_states)
-            x, y = dataset.sample(n, self.max_len)  # y is already normalized
+            x, y = dataset.sample(n, args.max_len)  # y is already normalized
             n = len(x)
             traj_states += lists(n)
             traj_actions += lists(n)
             traj_rewards += lists(n)
             traj_dones += lists(n)
             
+            sequences = [self.tokenizer.detokenize(tokens) for tokens in x]
             # Convert normalized labels to rewards using reward shaper
             y_tensor = torch.tensor(y, device=self.device, dtype=torch.float32)
-            rewards = self.reward_shaper.from_label(y_tensor, already_normalized=True)
+            base_rewards = self.reward_shaper.from_label(y_tensor, already_normalized=True)
+            penalties = self.constraint_penalty.batch_penalties(sequences)
+            rewards = base_rewards * penalties
             bulk_trajs += list(zip(x, rewards.cpu().tolist()))
             for i in range(len(x)):
                 traj_states[i+m].append([])
@@ -184,7 +198,7 @@ def train_generator(args, generator, oracle, tokenizer, dataset, logged_data, re
                 logged_data[full_key] = []
             logged_data[full_key].append(val.item())
         
-        if it % 100 == 0:
+        if it % 10 == 0:
             rs = torch.tensor([i[-1] for i in rollout_artifacts["trajectories"]["traj_rewards"]][:args.gen_episodes_per_step]).mean().item()
             if 'gen_reward' not in logged_data:
                 logged_data['gen_reward'] = []
@@ -197,6 +211,7 @@ def train_generator(args, generator, oracle, tokenizer, dataset, logged_data, re
         # Call during training
         if it % 50 == 0:
             analyze_action_distribution(rollout_worker, generator, tokenizer)
+            analyze_constraint_violations(rollout_worker, generator, tokenizer)
     
     return rollout_worker, None
 
@@ -226,7 +241,7 @@ def log_overall_metrics(dataset, logged_data, round_num, collected=False):
         logged_data[f'round_{round_num}_top_128_collected_scores'] = np.mean(top100[1])
         logged_data[f'round_{round_num}_max_128_collected_scores'] = np.max(top100[1])
         logged_data[f'round_{round_num}_top_128_collected_seqs'] = top100[0]
-        print(f"Round {round_num} - Collected Scores: Mean={np.mean(top100[1]):.6f}, Max={np.max(top100[1]):.6f}, Median={np.percentile(top100[1], 50):.6f}")
+        print(f"Round {round_num} - Collected Scores: Mean={np.mean(top100[1]):.6f}, Max={np.max(top100[1]):.6f}, Min={np.min(top100[1]):.6f}, Median={np.percentile(top100[1], 50):.6f}")
 
 def save_data(save_path, logged_data, args):
     import json
@@ -264,7 +279,7 @@ def train(args, oracle, dataset, tokenizer):
     logged_data = {}
     
     proxy = get_proxy(args, tokenizer, dataset=dataset)
-    proxy.update(dataset)
+    # proxy.update(dataset)
     
     for round in range(args.num_rounds):
         print(f"\n=== Starting Round {round+1}/{args.num_rounds} ===")
@@ -272,7 +287,7 @@ def train(args, oracle, dataset, tokenizer):
         
         # Pass the reward shaper from proxy
         rollout_worker, losses = train_generator(
-            args, generator, proxy, tokenizer, dataset, logged_data, 
+            args, generator, oracle, tokenizer, dataset, logged_data, 
             reward_shaper=proxy.shaper
         )
         
@@ -284,8 +299,8 @@ def train(args, oracle, dataset, tokenizer):
         dataset.add(batch)
         log_overall_metrics(dataset, logged_data, round+1, collected=True)
         
-        if round != args.num_rounds - 1: 
-            proxy.update(dataset)
+        # if round != args.num_rounds - 1: 
+        #     proxy.update(dataset)
         
         save_data(args.save_path, logged_data, args)
 
@@ -316,6 +331,54 @@ def analyze_action_distribution(rollout_worker, generator, tokenizer, n_episodes
     top_aa_pct = action_counts.most_common(1)[0][1] / total
     if top_aa_pct > 0.5:
         print(f"\n⚠️  WARNING: One amino acid dominates {top_aa_pct*100:.1f}% of sequences!")
+
+
+def analyze_constraint_violations(rollout_worker, generator, tokenizer, n_episodes=16):
+    """Analyze how well generated sequences satisfy constraints"""
+    print("\n=== Constraint Violation Analysis ===")
+    
+    _, states, _, _, _, _ = rollout_worker.rollout(generator, n_episodes, use_rand_policy=False)
+    
+    violations = {
+        'cysteine': 0,
+        'hydrophobic': 0,
+        'aromatic_low': 0,
+        'aromatic_high': 0,
+        'any': 0
+    }
+    
+    penalty_stats = []
+    
+    for state in states:
+        seq = tokenizer.detokenize(state)
+        penalty, breakdown = rollout_worker.constraint_penalty.compute_total_penalty(seq)
+        penalty_stats.append(penalty)
+        
+        # Check individual violations
+        cys_frac = seq.count('C') / len(seq) if len(seq) > 0 else 0
+        hydro_frac = sum(1 for aa in seq if aa in 'AILMFWVY') / len(seq) if len(seq) > 0 else 0
+        arom_frac = sum(1 for aa in seq if aa in 'FWY') / len(seq) if len(seq) > 0 else 0
+        
+        if cys_frac > 0.03:
+            violations['cysteine'] += 1
+        if hydro_frac > 0.35:
+            violations['hydrophobic'] += 1
+        if arom_frac < 0.08:
+            violations['aromatic_low'] += 1
+        if arom_frac > 0.12:
+            violations['aromatic_high'] += 1
+        if penalty < 0.99:
+            violations['any'] += 1
+    
+    n = len(states)
+    print(f"Sequences analyzed: {n}")
+    print(f"Mean penalty factor: {np.mean(penalty_stats):.3f}")
+    print(f"\nViolation rates:")
+    print(f"  Cysteine >3%:      {violations['cysteine']/n*100:.1f}%")
+    print(f"  Hydrophobic >35%:  {violations['hydrophobic']/n*100:.1f}%")
+    print(f"  Aromatic <8%:      {violations['aromatic_low']/n*100:.1f}%")
+    print(f"  Aromatic >12%:     {violations['aromatic_high']/n*100:.1f}%")
+    print(f"  Any constraint:    {violations['any']/n*100:.1f}%")
 
 
 

@@ -28,7 +28,7 @@ class IDPDataset:
     def _load_dataset(self, csv_path, test_size):
         df = pd.read_csv(csv_path)
         seqs = df['sequence'].values
-        scores = df['score'].values
+        scores = df['csat'].values
         batch_tokens = []
         batch_scores = []
         for seq, score in zip(seqs, scores):
@@ -243,4 +243,5 @@ class IDPDataset:
 
 def get_dataset(args, tokenizer):
     dataset = IDPDataset(args=args, tokenizer=tokenizer)
+    dataset.map_normalize_y()
     return dataset
