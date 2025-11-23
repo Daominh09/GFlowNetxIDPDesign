@@ -140,57 +140,68 @@ class IDPDataset:
         return [self.tokenizer.detokenize(tokens) for tokens in batch_tokens]
 
     def _top_k(self, data, k, denormalize=True):
-        scores = data[1]                  
+        """Sample k sequences that span the entire target range."""
+        scores = data[1]
         tokens = data[0]
         
-        # Direct mode: simply sort by score (higher is better)
-        if self.use_direct_mode:
-            indices = np.argsort(scores)[::-1][:k]  # Descending order
-            topk_scores = scores[indices]
-            topk_tokens = [tokens[i] for i in indices]
-            return self._tostr(topk_tokens), topk_scores
+        target_low = self.args.target_dg_low
+        target_high = self.args.target_dg_high
+        denorm_scores = self.denormalize_scores(scores) if self.is_normalized else scores
         
-        # Range mode
-        if self.args.proxy_mode == "range":
-            target_low = self.args.target_dg_low
-            target_high = self.args.target_dg_high
-            denorm_scores = self.denormalize_scores(scores) if self.is_normalized else scores
-            lower_margin = denorm_scores - target_low
-            upper_margin = target_high - denorm_scores
-            
-            if self.args.preference_direction == 1:
-                fitness = np.where(
-                    (denorm_scores >= target_low) & (denorm_scores <= target_high),
-                    denorm_scores,
-                    -np.abs(np.minimum(lower_margin, upper_margin))
-                )
-            elif self.args.preference_direction == -1:
-                fitness = np.where(
-                    (denorm_scores >= target_low) & (denorm_scores <= target_high),
-                    -denorm_scores,
-                    -np.abs(np.minimum(lower_margin, upper_margin))
-                )
-            else:
-                fitness = np.where(
-                    (denorm_scores >= target_low) & (denorm_scores <= target_high),
-                    np.minimum(denorm_scores - target_low, target_high - denorm_scores),
-                    -np.abs(np.minimum(lower_margin, upper_margin))
-                )
-            
-            indices = np.argsort(fitness)[::-1][:k]
-            topk_scores = scores[indices]
-            
+        # Find indices within target range
+        in_range_mask = (denorm_scores >= target_low) & (denorm_scores <= target_high)
+        in_range_indices = np.where(in_range_mask)[0]
+        
+        if len(in_range_indices) == 0:
+            # Fall back to closest to range
+            distances = np.minimum(
+                np.abs(denorm_scores - target_low),
+                np.abs(denorm_scores - target_high)
+            )
+            indices = np.argsort(distances)[:k]
+        elif len(in_range_indices) <= k:
+            indices = in_range_indices
         else:
-            # Gaussian mode: find sequences closest to target_y
-            target = self.normalize_scores(self.args.target_y)
-            distance = abs(scores - target)  
-            indices = np.argsort(distance)[::-1][-k:]
-            topk_scores = scores[indices]
+            # Stratified sampling: divide range into k bins
+            in_range_scores = denorm_scores[in_range_indices]
+            
+            # Create bins across the target range
+            bin_edges = np.linspace(target_low, target_high, k + 1)
+            bin_assignments = np.digitize(in_range_scores, bin_edges[1:-1])
+            
+            selected_indices = []
+            for bin_idx in range(k):
+                bin_mask = bin_assignments == bin_idx
+                bin_candidates = in_range_indices[bin_mask]
+                
+                if len(bin_candidates) > 0:
+                    # Pick one from this bin (could randomize or pick closest to bin center)
+                    bin_center = (bin_edges[bin_idx] + bin_edges[bin_idx + 1]) / 2
+                    bin_scores = denorm_scores[bin_candidates]
+                    best_in_bin = bin_candidates[np.argmin(np.abs(bin_scores - bin_center))]
+                    selected_indices.append(best_in_bin)
+            
+            # If some bins were empty, fill remaining slots
+            if len(selected_indices) < k:
+                remaining = set(in_range_indices) - set(selected_indices)
+                remaining_scores = denorm_scores[list(remaining)]
+                # Fill with evenly spaced samples from remaining
+                additional_needed = k - len(selected_indices)
+                if len(remaining) > 0:
+                    remaining_list = list(remaining)
+                    step = max(1, len(remaining_list) // additional_needed)
+                    for i in range(0, len(remaining_list), step):
+                        if len(selected_indices) >= k:
+                            break
+                        selected_indices.append(remaining_list[i])
+            
+            indices = np.array(selected_indices[:k])
         
+        topk_scores = scores[indices]
         if denormalize and not self.use_direct_mode:
             topk_scores = self.denormalize_scores(topk_scores)
         
-        topk_tokens = [tokens[i] for i in indices]  
+        topk_tokens = [tokens[i] for i in indices]
         return self._tostr(topk_tokens), topk_scores
 
     def top_k(self, k, denormalize=True):

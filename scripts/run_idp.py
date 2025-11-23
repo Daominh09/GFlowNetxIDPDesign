@@ -119,7 +119,7 @@ class RolloutWorker:
             seq = self.tokenizer.detokenize(states[mbidx])
             penalty, breakdown = self.constraint_penalty.compute_total_penalty(seq)
             reward = base_reward * penalty
-            if it % 100 == 0 and penalty < 0.9:
+            if it != 0 and it % 100 == 0 and penalty < 0.9:
                 print(f"  Constraint penalty: {penalty:.3f} | {breakdown}")
             traj_rewards[mbidx][-1] = reward
             rq.append(r.item())

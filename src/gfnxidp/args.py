@@ -52,9 +52,9 @@ def get_default_args():
     parser.add_argument("--gen_random_action_prob", type=float, default=0.001)
     parser.add_argument("--gen_sampling_temperature", type=float, default=3.0)
     parser.add_argument("--gen_data_sample_per_step", type=float, default=16)
-    parser.add_argument("--gen_num_iterations", type=float, default=150)
-    parser.add_argument("--num_sampled_per_round", type=float, default=1024)
-    parser.add_argument("--num_rounds", type=float, default=3)
+    parser.add_argument("--gen_num_iterations", type=float, default=500)
+    parser.add_argument("--num_sampled_per_round", type=float, default=128)
+    parser.add_argument("--num_rounds", type=float, default=1)
 
     # ---------------- Oracle ----------------
     parser.add_argument(
@@ -166,7 +166,7 @@ def get_default_args():
     parser.add_argument('--hydrophobic_penalty_strength', type=float, default=10.0)
     parser.add_argument('--aromatic_penalty_strength', type=float, default=10.0)
     parser.add_argument('--use_disorder_filter', type=int, default=1)
-    parser.add_argument('--min_disorder_score', type=float, default=0.65)
+    parser.add_argument('--min_disorder_score', type=float, default=0.7)
     parser.add_argument('--max_ordered_stretch', type=int, default=15)
     parser.add_argument('--disorder_penalty_strength', type=float, default=2.0)
 
