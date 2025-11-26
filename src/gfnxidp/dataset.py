@@ -144,8 +144,8 @@ class IDPDataset:
         scores = data[1]
         tokens = data[0]
         
-        target_low = self.args.target_dg_low
-        target_high = self.args.target_dg_high
+        target_low = self.args.target_logcdil_low
+        target_high = self.args.target_logcdil_high
         denorm_scores = self.denormalize_scores(scores) if self.is_normalized else scores
         
         # Find indices within target range

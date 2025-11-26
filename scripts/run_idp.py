@@ -2,10 +2,11 @@ import torch
 import numpy as np
 from torch.distributions import Categorical
 from tqdm import tqdm
+from typing import List, Dict, Tuple, Optional
 
 from gfnxidp import get_dataset
 from gfnxidp import get_generator
-from gfnxidp import get_oracle, ProtVec
+from gfnxidp import get_oracle
 from gfnxidp import get_proxy, IDPConstraintPenalty
 from gfnxidp import get_tokenizer
 from gfnxidp import get_default_args
@@ -104,6 +105,8 @@ class RolloutWorker:
 
     def execute_train_episode_batch(self, model, it=0, dataset=None, use_rand_policy=True):
         # run an episode
+        if it % 200 == 0 and it != 0 and it != args.gen_num_iterations:
+            self.reward_shaper.lambda_decay *= 0.5
         lists = lambda n: [list() for i in range(n)]
         visited, states, traj_states, \
             traj_actions, traj_rewards, traj_dones = self.rollout(model, self.episodes_per_step, use_rand_policy=use_rand_policy) 
@@ -117,10 +120,17 @@ class RolloutWorker:
             reward_tensor = torch.tensor(r, device=self.device, dtype=torch.float32)
             base_reward = self.reward_shaper.from_label(reward_tensor, already_normalized=False)
             seq = self.tokenizer.detokenize(states[mbidx])
-            penalty, breakdown = self.constraint_penalty.compute_total_penalty(seq)
-            reward = base_reward * penalty
-            if it != 0 and it % 100 == 0 and penalty < 0.9:
-                print(f"  Constraint penalty: {penalty:.3f} | {breakdown}")
+            if self.constraint_penalty is not None:
+                penalty, constraint_info = self.constraint_penalty.compute_total_penalty(seq)
+                reward = base_reward * penalty
+            else:
+                reward = base_reward
+
+            
+            if it != 0 and it % 100 == 0:
+                if constraint_info:
+                    print(f"  Constraint penalty: {penalty:.3f} | {constraint_info}")
+            
             traj_rewards[mbidx][-1] = reward
             rq.append(r.item())
             s = states[mbidx]
@@ -142,8 +152,13 @@ class RolloutWorker:
             # Convert normalized labels to rewards using reward shaper
             y_tensor = torch.tensor(y, device=self.device, dtype=torch.float32)
             base_rewards = self.reward_shaper.from_label(y_tensor, already_normalized=True)
-            penalties = self.constraint_penalty.batch_penalties(sequences)
-            rewards = base_rewards * penalties
+
+            if self.constraint_penalty is not None:
+                penalties = self.constraint_penalty.batch_penalties(sequences)
+                rewards = base_rewards * penalties
+            else:
+                rewards = base_rewards
+
             bulk_trajs += list(zip(x, rewards.cpu().tolist()))
             for i in range(len(x)):
                 traj_states[i+m].append([])
@@ -210,8 +225,8 @@ def train_generator(args, generator, oracle, tokenizer, dataset, logged_data, re
 
         # Call during training
         if it % 50 == 0:
-            analyze_action_distribution(rollout_worker, generator, tokenizer)
-            analyze_constraint_violations(rollout_worker, generator, tokenizer)
+            analyze_generation_quality(rollout_worker, generator, tokenizer)
+
     
     return rollout_worker, None
 
@@ -274,6 +289,15 @@ def save_data(save_path, logged_data, args):
 
     print(f"Data saved to {save_path}")
 
+def save_model(generator, save_path):
+    checkpoint = {
+        'model_state_dict': generator.model.state_dict(),
+        'Z': generator.model.Z.item(),
+    }
+    
+    torch.save(checkpoint, save_path)
+    print(f"✓ Model saved to: {save_path}")
+
 
 def train(args, oracle, dataset, tokenizer):
     logged_data = {}
@@ -303,14 +327,50 @@ def train(args, oracle, dataset, tokenizer):
         #     proxy.update(dataset)
         
         save_data(args.save_path, logged_data, args)
+    
+    model_path = args.model_path
+    save_model(generator, model_path)
+    print("\n✓ Training complete!")
 
-# After some training iterations, check action distribution:
-def analyze_action_distribution(rollout_worker, generator, tokenizer, n_episodes=16):
-    print("\n=== Action Distribution Analysis ===")
+
+
+def analyze_generation_quality(rollout_worker, generator, tokenizer, n_episodes=16):
+    """Comprehensive analysis including constraints and motifs"""
+    print("\n=== Generation Quality Analysis ===")
     
     _, states, _, _, _, _ = rollout_worker.rollout(generator, n_episodes, use_rand_policy=False)
+    sequences = [tokenizer.detokenize(s) for s in states]
     
-    # Count amino acid frequencies
+    # Constraint analysis
+    if rollout_worker.constraint_penalty is not None:
+        print("\n--- Constraint Analysis ---")
+        violations = {'cysteine': 0, 'hydrophobic': 0, 'aromatic': 0, 'any': 0}
+        penalty_stats = []
+        
+        for seq in sequences:
+            penalty, breakdown = rollout_worker.constraint_penalty.compute_total_penalty(seq)
+            penalty_stats.append(penalty)
+            
+            cys_frac = seq.count('C') / len(seq) if len(seq) > 0 else 0
+            hydro_frac = sum(1 for aa in seq if aa in 'AILMFWVY') / len(seq) if len(seq) > 0 else 0
+            arom_frac = sum(1 for aa in seq if aa in 'FWY') / len(seq) if len(seq) > 0 else 0
+            
+            if cys_frac > 0.03:
+                violations['cysteine'] += 1
+            if hydro_frac > 0.35:
+                violations['hydrophobic'] += 1
+            if arom_frac < 0.08 or arom_frac > 0.12:
+                violations['aromatic'] += 1
+            if penalty < 0.99:
+                violations['any'] += 1
+        
+        n = len(sequences)
+        print(f"Sequences: {n}")
+        print(f"Mean constraint penalty: {np.mean(penalty_stats):.3f}")
+        print(f"Violations: Cys={violations['cysteine']}, Hydro={violations['hydrophobic']}, "
+              f"Arom={violations['aromatic']}, Any={violations['any']}")
+    
+    # Action distribution
     from collections import Counter
     all_actions = []
     for state in states:
@@ -318,67 +378,12 @@ def analyze_action_distribution(rollout_worker, generator, tokenizer, n_episodes
     
     action_counts = Counter(all_actions)
     total = len(all_actions)
-    
-    print(f"Total actions: {total}")
-    print(f"Unique amino acids used: {len(action_counts)}/20")
-    print("\nTop 10 amino acids:")
+    print(f"\n--- Amino Acid Distribution ---")
+    print(f"Total actions: {total}, Unique AAs: {len(action_counts)}")
+    print("Top 10:")
     for aa_idx, count in action_counts.most_common(10):
         aa = tokenizer.itos[aa_idx] if aa_idx < len(tokenizer.itos) else f"IDX{aa_idx}"
-        pct = 100 * count / total
-        print(f"  {aa}: {count} ({pct:.1f}%)")
-    
-    # Check if dominated by single AA
-    top_aa_pct = action_counts.most_common(1)[0][1] / total
-    if top_aa_pct > 0.5:
-        print(f"\n⚠️  WARNING: One amino acid dominates {top_aa_pct*100:.1f}% of sequences!")
-
-
-def analyze_constraint_violations(rollout_worker, generator, tokenizer, n_episodes=16):
-    """Analyze how well generated sequences satisfy constraints"""
-    print("\n=== Constraint Violation Analysis ===")
-    
-    _, states, _, _, _, _ = rollout_worker.rollout(generator, n_episodes, use_rand_policy=False)
-    
-    violations = {
-        'cysteine': 0,
-        'hydrophobic': 0,
-        'aromatic_low': 0,
-        'aromatic_high': 0,
-        'any': 0
-    }
-    
-    penalty_stats = []
-    
-    for state in states:
-        seq = tokenizer.detokenize(state)
-        penalty, breakdown = rollout_worker.constraint_penalty.compute_total_penalty(seq)
-        penalty_stats.append(penalty)
-        
-        # Check individual violations
-        cys_frac = seq.count('C') / len(seq) if len(seq) > 0 else 0
-        hydro_frac = sum(1 for aa in seq if aa in 'AILMFWVY') / len(seq) if len(seq) > 0 else 0
-        arom_frac = sum(1 for aa in seq if aa in 'FWY') / len(seq) if len(seq) > 0 else 0
-        
-        if cys_frac > 0.03:
-            violations['cysteine'] += 1
-        if hydro_frac > 0.35:
-            violations['hydrophobic'] += 1
-        if arom_frac < 0.08:
-            violations['aromatic_low'] += 1
-        if arom_frac > 0.12:
-            violations['aromatic_high'] += 1
-        if penalty < 0.99:
-            violations['any'] += 1
-    
-    n = len(states)
-    print(f"Sequences analyzed: {n}")
-    print(f"Mean penalty factor: {np.mean(penalty_stats):.3f}")
-    print(f"\nViolation rates:")
-    print(f"  Cysteine >3%:      {violations['cysteine']/n*100:.1f}%")
-    print(f"  Hydrophobic >35%:  {violations['hydrophobic']/n*100:.1f}%")
-    print(f"  Aromatic <8%:      {violations['aromatic_low']/n*100:.1f}%")
-    print(f"  Aromatic >12%:     {violations['aromatic_high']/n*100:.1f}%")
-    print(f"  Any constraint:    {violations['any']/n*100:.1f}%")
+        print(f"  {aa}: {count} ({100*count/total:.1f}%)")
 
 
 

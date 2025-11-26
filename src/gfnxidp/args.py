@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATASETS_DIR = PROJECT_ROOT / "datasets"
 LOGS_DIR = PROJECT_ROOT / "logs"
 TOOLS_DIR = PROJECT_ROOT / "src" / "gfnxidp" / "tools"
-
+MODELS_DIR = PROJECT_ROOT / "models"
 
 def get_default_args():
     """
@@ -52,7 +52,7 @@ def get_default_args():
     parser.add_argument("--gen_random_action_prob", type=float, default=0.001)
     parser.add_argument("--gen_sampling_temperature", type=float, default=3.0)
     parser.add_argument("--gen_data_sample_per_step", type=float, default=16)
-    parser.add_argument("--gen_num_iterations", type=float, default=500)
+    parser.add_argument("--gen_num_iterations", type=float, default=800)
     parser.add_argument("--num_sampled_per_round", type=float, default=128)
     parser.add_argument("--num_rounds", type=float, default=1)
 
@@ -130,15 +130,15 @@ def get_default_args():
         choices=["gaussian", "range", "direct"],
     )
     parser.add_argument(
-        "--target_dg_low",
+        "--target_logcdil_low",
         type=float,
-        default=-3.0,
+        default=2.5,
         help="Lower bound of target ΔG range",
     )
     parser.add_argument(
-        "--target_dg_high",
+        "--target_logcdil_high",
         type=float,
-        default=2.5,
+        default=3.7,
         help="Upper bound of target ΔG range",
     )
     parser.add_argument(
@@ -167,15 +167,23 @@ def get_default_args():
     parser.add_argument('--aromatic_penalty_strength', type=float, default=10.0)
     parser.add_argument('--use_disorder_filter', type=int, default=1)
     parser.add_argument('--min_disorder_score', type=float, default=0.7)
-    parser.add_argument('--max_ordered_stretch', type=int, default=15)
-    parser.add_argument('--disorder_penalty_strength', type=float, default=2.0)
-
+    parser.add_argument('--disorder_penalty_strength', type=float, default=3.0)
 
     # ---------------- Logging ----------------
     parser.add_argument(
         "--save_path",
         type=str,
         default=str(LOGS_DIR / "training_log.json"),
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default=str(MODELS_DIR / "gfn_generator.pt"),
+    )
+    parser.add_argument(
+        "--generate_path",
+        type=str,
+        default=str(LOGS_DIR / "generating_log.json"),
     )
 
     # Parse empty list for defaults only

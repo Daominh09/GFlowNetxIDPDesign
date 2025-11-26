@@ -154,12 +154,12 @@ class RangeTargetRewardShaper:
         self.device = args.device
         
         # Target range parameters (in ORIGINAL scale)
-        target_dg_low_original = getattr(args, 'target_dg_low', -8.0)
-        target_dg_high_original = getattr(args, 'target_dg_high', -6.0)
+        target_logcdil_low_original = getattr(args, 'target_logcdil_low', -8.0)
+        target_logcdil_high_original = getattr(args, 'target_logcdil_high', -6.0)
         
         # Normalize the target ranges to match the normalized score space
-        self.c_low = dataset.normalize_scores(target_dg_low_original)
-        self.c_high = dataset.normalize_scores(target_dg_high_original)
+        self.c_low = dataset.normalize_scores(target_logcdil_low_original)
+        self.c_high = dataset.normalize_scores(target_logcdil_high_original)
         
         self.preference_direction = getattr(args, 'preference_direction', 0)
         
@@ -172,7 +172,7 @@ class RangeTargetRewardShaper:
         self.reward_exp_ramping = getattr(args, 'gen_reward_exp_ramping', 0.0)
         
         print(f"\nRangeTargetRewardShaper initialized (NORMALIZED version):")
-        print(f"  Target range (original): [{target_dg_low_original}, {target_dg_high_original}]")
+        print(f"  Target range (original): [{target_logcdil_low_original}, {target_logcdil_high_original}]")
         print(f"  Target range (normalized): [{self.c_low:.4f}, {self.c_high:.4f}]")
         print(f"  Preference direction: {self.preference_direction}")
         print(f"  Lambda decay: {self.lambda_decay}")
@@ -273,242 +273,9 @@ class RangeTargetProxy:
         r = self.shaper.from_score(mean, iteration=iteration, this=True)
         
         return r
-    
-class TargetRewardShaper:
-    def __init__(self, args, dataset):
-        self.args = args
-        self.dataset = dataset
-        self.device = args.device
-        self.y_star_norm = self.dataset.normalize_scores(args.target_y)
-        
-        # Reward transformation parameters (like l2r in original paper)
-        self.reward_exp = getattr(args, 'gen_reward_exp', 2.0)
-        self.reward_exp_ramping = getattr(args, 'gen_reward_exp_ramping', 3.0)
-
-    def from_score(self, s, std=None, iteration=0):
-        args = self.args
-        s = _safe_tensor(s, self.device).view(-1)
-        mode = getattr(args, "proxy_mode", "gaussian").lower()
-        # Compute base reward in [0, 1] based on distance from target
-        if mode == "gaussian":
-            y_star = _safe_tensor(self.y_star_norm, self.device)
-            if args.use_uncertainty_in_width and std is not None:
-                std = _safe_tensor(std, self.device).view(-1)
-                var = std.pow(2) + (args.target_tau ** 2)
-            else:
-                var = _safe_tensor(args.target_tau ** 2, self.device).expand_as(s)
-            var = torch.clamp(var, min=1e-12)
-            
-            # Base Gaussian reward [0, 1]
-            r_base = torch.exp(- (s - y_star).pow(2) / (2.0 * var))
-
-        elif mode == "interval":
-            y_star = _safe_tensor(self.y_star_norm, self.device)
-            eps = _safe_tensor(args.target_eps, self.device)
-            if args.use_uncertainty_in_width and std is not None:
-                std = _safe_tensor(std, self.device).view(-1)
-                sig = torch.sqrt(std.pow(2) + (args.target_tau ** 2))
-            else:
-                sig = _safe_tensor(args.target_tau, self.device).expand_as(s)
-            sig = torch.clamp(sig, min=1e-6)
-            
-            # CDF of standard normal
-            Phi = lambda z: 0.5 * (1.0 + torch.erf(z / torch.sqrt(torch.tensor(2.0, device=self.device))))
-            z_hi = (y_star + eps - s) / sig
-            z_lo = (y_star - eps - s) / sig
-            r_base = torch.clamp(Phi(z_hi) - Phi(z_lo), 0.0, 1.0)
-
-        elif mode == "laplace":
-            y_star = _safe_tensor(self.y_star_norm, self.device)
-            b = _safe_tensor(args.target_b, self.device)
-            b = torch.clamp(b, min=1e-6)
-            r_base = torch.exp(- torch.abs(s - y_star) / b)
-
-        else:
-            # Fallback: just clamp scores
-            r_base = torch.clamp(s, min=0.0, max=1.0)
-        
-        if self.reward_exp_ramping > 0:
-            t = iteration
-            current_exp = 1 + (self.reward_exp - 1) * (1 - 1/(1 + t / self.reward_exp_ramping))
-        else:
-            # No ramping: constant exponent
-            current_exp = self.reward_exp
-        r_transformed = r_base.pow(current_exp)
-        return r_transformed
-    
-    def from_label(self, y_list_or_array, already_normalized=None, iteration=0):
-        if already_normalized is None:
-            already_normalized = getattr(self.dataset, "is_normalized", False)
-
-        if already_normalized:
-            y_norm = y_list_or_array
-        else:
-            y_norm = self.dataset.normalize_scores(y_list_or_array)
-
-        y_norm = _safe_tensor(y_norm, self.device).view(-1)
-        return self.from_score(y_norm, std=None, iteration=iteration)
-
-
-    
-class GaussianTargetProxy:
-    """Proxy with Gaussian reward shaping around target"""
-    def __init__(self, args, model, dataset):
-        self.args = args
-        self.model = model
-        self.dataset = dataset
-        self.device = args.device
-        self.shaper = TargetRewardShaper(args, dataset)
-
-    def fit(self, data):
-        self.model.fit(data, reset=True)
-
-    def update(self, data):
-        self.fit(data)
-
-    def __call__(self, x, iteration=0):
-        """
-        Compute rewards for sequences x at training iteration.
-        
-        Args:
-            x: List of token sequences
-            iteration: Current training iteration (for reward ramping)
-            
-        Returns:
-            r: Reward tensor in (0,1]
-        """
-        mean, std = self.model.forward_with_uncertainty(x)  # [N,1] each
-        mean = mean.view(-1)
-        std = std.view(-1)
-        r = self.shaper.from_score(mean, std, iteration=iteration)
-        return r
 
 
 
-
-def _safe_tensor(x, device, dtype=torch.float32):
-    """Convert various types to torch tensor safely"""
-    if torch.is_tensor(x):
-        return x.to(device=device, dtype=dtype)
-    return torch.tensor(x, device=device, dtype=dtype)
-
-class DirectRewardShaper:
-    """
-    Direct reward shaper for scores already in [0,1] range
-    No normalization, denormalization, or transformation needed
-    Use case: Deep phase scores, probabilities, or any pre-normalized metrics
-    """
-    def __init__(self, args, dataset=None):
-        self.args = args
-        self.dataset = dataset
-        self.device = args.device
-        
-        # Optional: Apply power transformation even for direct rewards
-        self.reward_exp = getattr(args, 'gen_reward_exp', 1.0)  # Default 1.0 = no transform
-        self.reward_exp_ramping = getattr(args, 'gen_reward_exp_ramping', 0.0)
-        
-        # Clipping bounds (to ensure valid reward range)
-        self.min_reward = getattr(args, 'reward_min_clip', 1e-6)
-        self.max_reward = getattr(args, 'reward_max_clip', 1.0)
-        
-        print(f"\nDirectRewardShaper initialized:")
-        print(f"  Score range: [0, 1] (no transformation needed)")
-        print(f"  Reward exponent: {self.reward_exp}")
-        print(f"  Reward ramping: {self.reward_exp_ramping}")
-        print(f"  Clip range: [{self.min_reward}, {self.max_reward}]")
-
-    def from_score(self, s, std=None, iteration=0):
-        """
-        Use predicted scores directly as rewards
-        
-        Args:
-            s: Predicted scores in [0,1] range (e.g., deep phase scores)
-            std: Standard deviation (optional, for uncertainty-based adjustments)
-            iteration: Current training iteration (for reward ramping)
-            
-        Returns:
-            r: Reward tensor in [min_reward, max_reward]
-        """
-        s = _safe_tensor(s, self.device).view(-1)
-        
-        # Clip to valid range
-        r_base = torch.clamp(s, min=0.0, max=1.0)
-        
-        # Optional: Apply power transformation with ramping
-        if self.reward_exp_ramping > 0:
-            t = iteration
-            current_exp = 1 + (self.reward_exp - 1) * (1 - 1/(1 + t / self.reward_exp_ramping))
-        else:
-            current_exp = self.reward_exp
-        
-        if current_exp != 1.0:
-            r_transformed = r_base.pow(current_exp)
-        else:
-            r_transformed = r_base
-        
-        # Final clipping to ensure minimum reward for numerical stability
-        r_final = torch.clamp(r_transformed, min=self.min_reward, max=self.max_reward)
-        
-        return r_final
-    
-    def from_label(self, y, already_normalized=None, iteration=0):
-        """
-        Convert oracle labels to rewards (no normalization needed)
-        
-        Args:
-            y: Oracle predictions already in [0,1] range
-            already_normalized: Ignored for direct mode
-            iteration: Current training iteration
-            
-        Returns:
-            r: Reward tensor
-        """
-        y = _safe_tensor(y, self.device).view(-1)
-        return self.from_score(y, std=None, iteration=iteration)
-
-
-class DirectRewardProxy:
-    """
-    Proxy for direct reward usage (no normalization/denormalization)
-    Use when predicted scores are already in [0,1] range
-    """
-    def __init__(self, args, model, dataset):
-        self.args = args
-        self.model = model
-        self.dataset = dataset
-        self.device = args.device
-        self.shaper = DirectRewardShaper(args, dataset)
-        
-        print(f"\nDirectRewardProxy initialized")
-        print(f"  Model will predict scores in [0,1] range directly")
-        print(f"  No normalization/denormalization applied")
-
-    def fit(self, data):
-        """Train proxy model on raw [0,1] scores"""
-        self.model.fit(data, reset=True)
-
-    def update(self, data):
-        """Update proxy with new data"""
-        self.fit(data)
-
-    def __call__(self, x, iteration=0):
-        """
-        Compute rewards for sequences x
-        
-        Args:
-            x: List of token sequences
-            iteration: Current training iteration
-            
-        Returns:
-            r: Direct reward from predicted scores
-        """
-        mean, std = self.model.forward_with_uncertainty(x)
-        mean = mean.view(-1)
-        
-        # Use mean prediction directly as reward
-        r = self.shaper.from_score(mean, std=std, iteration=iteration)
-        
-        return r
     
 class IDPConstraintPenalty:
     """
@@ -526,7 +293,6 @@ class IDPConstraintPenalty:
         self.aromatic_min_fraction = getattr(args, 'aromatic_min_fraction', 0.08)
         self.aromatic_max_fraction = getattr(args, 'aromatic_max_fraction', 0.12)
         self.min_disorder_score = getattr(args, 'min_disorder_score', 0.65)
-        self.max_ordered_stretch = getattr(args, 'max_ordered_stretch', 15)
         
         # Penalty strengths (how harsh the penalty is)
         self.cys_penalty_strength = getattr(args, 'cys_penalty_strength', 10.0)
@@ -552,7 +318,7 @@ class IDPConstraintPenalty:
         print(f"  Hydrophobic: max {self.hydrophobic_max_fraction*100:.1f}% (penalty strength: {self.hydrophobic_penalty_strength})")
         print(f"  Aromatic: {self.aromatic_min_fraction*100:.1f}%-{self.aromatic_max_fraction*100:.1f}% (penalty strength: {self.aromatic_penalty_strength})")
         if self.use_disorder_filter:
-            print(f"  Disorder: min score {self.min_disorder_score}, max ordered stretch {self.max_ordered_stretch}")
+            print(f"  Disorder: min score {self.min_disorder_score}, (penelty strength: {self.disorder_penalty_strength})")
         print(f"{'='*60}\n")
     
     def compute_cysteine_penalty(self, seq: str) -> float:
@@ -679,46 +445,6 @@ class IDPConstraintPenalty:
         return torch.tensor(penalties, device=self.device, dtype=torch.float32)
 
 
-class ConstrainedRewardShaper:
-    """
-    Wrapper that applies constraint penalties to any base reward shaper.
-    final_reward = base_reward * constraint_penalty
-    """
-    def __init__(self, base_shaper, constraint_penalty: IDPConstraintPenalty, tokenizer):
-        self.base_shaper = base_shaper
-        self.constraint_penalty = constraint_penalty
-        self.tokenizer = tokenizer
-        self.device = base_shaper.device
-        
-        # Expose base shaper attributes
-        self.reward_exp = getattr(base_shaper, 'reward_exp', 1.0)
-        self.reward_exp_ramping = getattr(base_shaper, 'reward_exp_ramping', 0.0)
-    
-    def from_score(self, s, std=None, iteration=0, sequences=None):
-        """Apply base reward + constraint penalties"""
-        base_reward = self.base_shaper.from_score(s, std, iteration)
-        
-        if sequences is not None:
-            penalties = self.constraint_penalty.batch_penalties(sequences)
-            return base_reward * penalties
-        return base_reward
-    
-    def from_label(self, y, already_normalized=None, iteration=0, sequences=None):
-        """Apply base reward + constraint penalties"""
-        base_reward = self.base_shaper.from_label(y, already_normalized, iteration)
-        
-        if sequences is not None:
-            penalties = self.constraint_penalty.batch_penalties(sequences)
-            return base_reward * penalties
-        return base_reward
-    
-    def from_label_with_tokens(self, y, tokens_list, already_normalized=None, iteration=0):
-        """
-        Convenience method when you have tokens instead of sequences.
-        Converts tokens to sequences and applies penalties.
-        """
-        sequences = [self.tokenizer.detokenize(tokens) for tokens in tokens_list]
-        return self.from_label(y, already_normalized, iteration, sequences)
 
 
 def _safe_tensor(x, device, dtype=torch.float32):
@@ -733,15 +459,7 @@ def get_proxy(args, tokenizer, dataset):
     model = DropoutRegressor(args, tokenizer)
 
     mode = getattr(args, "proxy_mode", "gaussian").lower()
-    
-    if mode == "gaussian":
-        proxy = GaussianTargetProxy(args, model, dataset)
-    elif mode == "range":
-        proxy = RangeTargetProxy(args, model, dataset)
-    elif mode == "direct":  # NEW MODE
-        proxy = DirectRewardProxy(args, model, dataset)
-    else:
-        raise ValueError(f"Unknown proxy_mode: {mode}. Choose from: 'gaussian', 'range', 'direct'")
+    proxy = RangeTargetProxy(args, model, dataset)
 
     # Expose common adapter methods for compatibility
     proxy.score_to_reward = lambda s, std=None, it=0: proxy.shaper.from_score(s, iteration=it)
@@ -751,7 +469,7 @@ def get_proxy(args, tokenizer, dataset):
     print(f"Proxy Configuration:")
     print(f"  Mode: {mode}")
     if mode == "range":
-        print(f"  Target ΔG range: [{args.target_dg_low}, {args.target_dg_high}]")
+        print(f"  Target ΔG range: [{args.target_logcdil_low}, {args.target_logcdil_high}]")
         print(f"  Preference direction: {args.preference_direction}")
     elif mode == "direct":
         print(f"  Direct reward mode (scores in [0,1])")

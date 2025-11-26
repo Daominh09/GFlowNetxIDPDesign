@@ -2,16 +2,41 @@ import pandas as pd
 import numpy as np
 import json
 from tqdm import tqdm
+import re
 
 from gfnxidp import get_default_args
 from gfnxidp import get_oracle
 from gfnxidp import get_tokenizer
 from gfnxidp.utils import Model, AttrSetter
 
+# Motif library
+MOTIF_LIBRARY = {
+    'RGG_short': 'RGGRGG',
+    'FG_repeat': 'FGFG',
+    'Aromatic': 'FYFY',
+    'Prion': 'SYGQ',
+    'RG_dipep': 'RGRG',
+}
+
 
 import tempfile
 import subprocess
 import os
+
+
+def analyze_motifs_in_sequence(seq):
+    """
+    Check which motifs are present in a sequence.
+    Returns dict with boolean flags for each motif.
+    """
+    motif_presence = {}
+    for name, motif_seq in MOTIF_LIBRARY.items():
+        motif_presence[f'has_{name}'] = motif_seq in seq
+    
+    # Count total motifs present
+    motif_presence['total_motifs'] = sum(motif_presence.values())
+    
+    return motif_presence
 
 
 def predict_disorder_iupred(seq, iupred_path):
@@ -174,7 +199,7 @@ def compute_constraint_penalty(seq, args=None):
 
 def run_oracle_on_json(input_json, output_csv, args, tokenizer, 
                        data_key="logged_data", 
-                       seq_key="round_1_top_128_collected_seqs"):
+                       seq_key="in_range_sequences"):
     """
     Run DG and CSAT predictions on sequences from a JSON file.
     Includes constraint analysis.
@@ -206,10 +231,15 @@ def run_oracle_on_json(input_json, output_csv, args, tokenizer,
         print("  IUPred2A not configured - disorder scores will be NaN")
     
     constraint_results = []
+    motif_results = []
     for seq in tqdm(sequences):
         result = compute_sequence_constraints(seq, args, iupred_path=iupred_path)
         result['penalty_factor'] = compute_constraint_penalty(seq, args)
         constraint_results.append(result)
+        
+        # Analyze motifs
+        motif_result = analyze_motifs_in_sequence(seq)
+        motif_results.append(motif_result)
     
     # ========== DG PREDICTIONS ==========
     print("\nRunning DG predictions...")
@@ -264,7 +294,14 @@ def run_oracle_on_json(input_json, output_csv, args, tokenizer,
         'disorder_violation': [r['disorder_violation'] for r in constraint_results],
         'any_violation': [r['any_violation'] for r in constraint_results],
         # Penalty factor
-        'penalty_factor': [r['penalty_factor'] for r in constraint_results]
+        'penalty_factor': [r['penalty_factor'] for r in constraint_results],
+        # Motif presence
+        'has_RGG_short': [m['has_RGG_short'] for m in motif_results],
+        'has_FG_repeat': [m['has_FG_repeat'] for m in motif_results],
+        'has_Aromatic': [m['has_Aromatic'] for m in motif_results],
+        'has_Prion': [m['has_Prion'] for m in motif_results],
+        'has_RG_dipep': [m['has_RG_dipep'] for m in motif_results],
+        'total_motifs': [m['total_motifs'] for m in motif_results],
     })
     
     # Sort by csat ascending
@@ -296,6 +333,14 @@ def run_oracle_on_json(input_json, output_csv, args, tokenizer,
     print(f"  Hydrophobic: mean={df['hydrophobic_fraction'].mean()*100:.2f}%, max={df['hydrophobic_fraction'].max()*100:.2f}%")
     print(f"  Aromatic:    mean={df['aromatic_fraction'].mean()*100:.2f}%, range=[{df['aromatic_fraction'].min()*100:.2f}%, {df['aromatic_fraction'].max()*100:.2f}%]")
     print(f"  Disorder:    mean={df['disorder_score'].mean():.3f}, min={df['disorder_score'].min():.3f}, max={df['disorder_score'].max():.3f}")
+    
+    print(f"\nMotif Presence:")
+    print(f"  RGG_short (RGGRGG):  {df['has_RGG_short'].sum()} ({df['has_RGG_short'].mean()*100:.1f}%)")
+    print(f"  FG_repeat (FGFG):    {df['has_FG_repeat'].sum()} ({df['has_FG_repeat'].mean()*100:.1f}%)")
+    print(f"  Aromatic (FYFY):     {df['has_Aromatic'].sum()} ({df['has_Aromatic'].mean()*100:.1f}%)")
+    print(f"  Prion (SYGQ):        {df['has_Prion'].sum()} ({df['has_Prion'].mean()*100:.1f}%)")
+    print(f"  RG_dipep (RGRG):     {df['has_RG_dipep'].sum()} ({df['has_RG_dipep'].mean()*100:.1f}%)")
+    print(f"  Mean motifs per seq: {df['total_motifs'].mean():.2f}")
     print(f"{'='*60}")
     
     return df
@@ -388,7 +433,7 @@ if __name__ == '__main__':
     
     # Process JSON file
     df_json = run_oracle_on_json(
-        input_json='logs/training_log.json',
+        input_json='logs/generating_log.json',
         output_csv='datasets/generated_data.csv',
         args=args,
         tokenizer=tokenizer

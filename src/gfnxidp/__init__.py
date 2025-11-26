@@ -7,7 +7,7 @@ throughout the package.
 
 from .args import get_default_args
 from .generator import get_generator
-from .oracle import ProtVec, get_oracle
+from .oracle import get_oracle
 from .dataset import IDPDataset, get_dataset
 from .tokenizer import get_tokenizer
 from .proxy import get_proxy, IDPConstraintPenalty
@@ -17,7 +17,6 @@ __all__ = [
     "get_default_args",
     "get_generator",
     "get_oracle",
-    "ProtVec",
     "IDPDataset",
     "get_dataset",
     "get_tokenizer",
