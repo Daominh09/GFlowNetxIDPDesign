@@ -1,6 +1,6 @@
 """
 Configuration file for IDP project using argparse.
-Contains settings for dataset, generator, oracle, and proxy.
+Contains settings for dataset, generator, oracle, proxy, and conditional generation.
 """
 
 import argparse
@@ -36,7 +36,7 @@ def get_default_args():
 
     # ---------------- Generator ----------------
     parser.add_argument("--reward_exp_min", default=1e-6, type=float)
-    parser.add_argument("--gen_Z_learning_rate", default=5e-3, type=float)
+    parser.add_argument("--gen_Z_learning_rate", default=1e-4, type=float)
     parser.add_argument("--generator_model", type=str, default=None)
     parser.add_argument("--gen_leaf_coef", type=float, default=25)
     parser.add_argument("--gen_output_coef", type=float, default=1)
@@ -52,9 +52,35 @@ def get_default_args():
     parser.add_argument("--gen_random_action_prob", type=float, default=0.001)
     parser.add_argument("--gen_sampling_temperature", type=float, default=3.0)
     parser.add_argument("--gen_data_sample_per_step", type=float, default=16)
-    parser.add_argument("--gen_num_iterations", type=float, default=800)
+    parser.add_argument("--gen_num_iterations", type=float, default=500)
     parser.add_argument("--num_sampled_per_round", type=float, default=128)
     parser.add_argument("--num_rounds", type=float, default=1)
+
+    # -------- Conditional Generation (NEW) --------
+    parser.add_argument(
+        "--csat_mean",
+        type=float,
+        default=1.487,
+        help="Mean of CSAT distribution in training data (for normalization)"
+    )
+    parser.add_argument(
+        "--csat_std",
+        type=float,
+        default=2.394,
+        help="Standard deviation of CSAT distribution in training data (for normalization)"
+    )
+    parser.add_argument(
+        "--condition_dim",
+        type=int,
+        default=1,
+        help="Dimension of conditioning signal (1 for single CSAT value)"
+    )
+    parser.add_argument(
+        "--condition_on_property",
+        type=int,
+        default=1,
+        help="Whether to enable property conditioning (1=yes, 0=no)"
+    )
 
     # ---------------- Oracle ----------------
     parser.add_argument(
@@ -132,13 +158,13 @@ def get_default_args():
     parser.add_argument(
         "--target_logcdil_low",
         type=float,
-        default=2.5,
+        default=-5.0,
         help="Lower bound of target ΔG range",
     )
     parser.add_argument(
         "--target_logcdil_high",
         type=float,
-        default=3.7,
+        default=5.0,
         help="Upper bound of target ΔG range",
     )
     parser.add_argument(
@@ -157,7 +183,7 @@ def get_default_args():
     parser.add_argument("--reward_min_clip", type=float, default=1e-6)
     parser.add_argument("--reward_max_clip", type=float, default=1.0)
 
-
+    # -------- Constraint Parameters --------
     parser.add_argument('--cys_max_fraction', type=float, default=0.03)
     parser.add_argument('--hydrophobic_max_fraction', type=float, default=0.35)
     parser.add_argument('--aromatic_min_fraction', type=float, default=0.08)
@@ -166,8 +192,22 @@ def get_default_args():
     parser.add_argument('--hydrophobic_penalty_strength', type=float, default=10.0)
     parser.add_argument('--aromatic_penalty_strength', type=float, default=10.0)
     parser.add_argument('--use_disorder_filter', type=int, default=1)
-    parser.add_argument('--min_disorder_score', type=float, default=0.7)
-    parser.add_argument('--disorder_penalty_strength', type=float, default=3.0)
+    parser.add_argument('--min_disorder_score', type=float, default=0.45)
+    parser.add_argument('--disorder_penalty_strength', type=float, default=1.0)
+
+    # -------- Generation Parameters (NEW) --------
+    parser.add_argument(
+        "--gen_reward_exp",
+        type=float,
+        default=2.0,
+        help="Power transformation for reward (used in reward shaping)"
+    )
+    parser.add_argument(
+        "--gen_reward_exp_ramping",
+        type=float,
+        default=0.0,
+        help="Ramping factor for reward exponent during training"
+    )
 
     # ---------------- Logging ----------------
     parser.add_argument(

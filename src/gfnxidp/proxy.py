@@ -142,10 +142,10 @@ class DropoutRegressor(nn.Module):
     def load(self, path):
         self.load_state_dict(path)
 
-class RangeTargetRewardShaper:
+class TargetRewardShaper:
     """
-    Reward shaper based on A-GFN's property-conditioned reward (Equation 2)
-    Supports target ranges [c_low, c_high] with preference direction
+    Reward shaper with dynamic per-sample targets
+    Each sample has its own target point rather than a fixed range
     Works in NORMALIZED score space
     """
     def __init__(self, args, dataset):
@@ -153,78 +153,53 @@ class RangeTargetRewardShaper:
         self.dataset = dataset
         self.device = args.device
         
-        # Target range parameters (in ORIGINAL scale)
-        target_logcdil_low_original = getattr(args, 'target_logcdil_low', -8.0)
-        target_logcdil_high_original = getattr(args, 'target_logcdil_high', -6.0)
-        
-        # Normalize the target ranges to match the normalized score space
-        self.c_low = dataset.normalize_scores(target_logcdil_low_original)
-        self.c_high = dataset.normalize_scores(target_logcdil_high_original)
-        
-        self.preference_direction = getattr(args, 'preference_direction', 0)
-        
         # Decay parameter (like λ in the paper)
-        # NOTE: This should also be adjusted for normalized scale
+        # NOTE: This should be adjusted for normalized scale
         self.lambda_decay = getattr(args, 'reward_lambda', 1.0)
         
         # Power transformation
         self.reward_exp = getattr(args, 'gen_reward_exp', 2.0)
         self.reward_exp_ramping = getattr(args, 'gen_reward_exp_ramping', 0.0)
         
-        print(f"\nRangeTargetRewardShaper initialized (NORMALIZED version):")
-        print(f"  Target range (original): [{target_logcdil_low_original}, {target_logcdil_high_original}]")
-        print(f"  Target range (normalized): [{self.c_low:.4f}, {self.c_high:.4f}]")
-        print(f"  Preference direction: {self.preference_direction}")
+        print(f"\nRangeTargetRewardShaper initialized (DYNAMIC TARGETS version):")
         print(f"  Lambda decay: {self.lambda_decay}")
         print(f"  Reward exponent: {self.reward_exp}")
 
-    def from_score(self, p_x, iteration=0, this=False):
+    def from_score(self, p_x, target_csat, iteration=0):
         """
-        Compute reward based on A-GFN's Equation 2/6/7
+        Compute reward based on distance from per-sample targets
         
         Args:
             p_x: Predicted property values (ΔG scores in NORMALIZED space)
+            target_csat: Target values for each sample (in NORMALIZED space)
             iteration: Current training iteration (for reward ramping)
             
         Returns:
-            r: Reward in (0, 1]
+            r: Reward tensor
         """
         p_x = _safe_tensor(p_x, self.device).view(-1)
-        c_low = _safe_tensor(self.c_low, self.device)
-        c_high = _safe_tensor(self.c_high, self.device)
+        target_csat = _safe_tensor(target_csat, self.device).view(-1)
         lambda_decay = _safe_tensor(self.lambda_decay, self.device)
         
-        # Three cases based on where p_x falls
-        below_range = p_x < c_low
-        above_range = p_x > c_high
-        in_range = ~(below_range | above_range)
-        r_base = torch.zeros_like(p_x)
+        # Ensure shapes match
+        if p_x.shape[0] != target_csat.shape[0]:
+            raise ValueError(f"p_x and target_csat must have same size. Got {p_x.shape[0]} vs {target_csat.shape[0]}")
         
-        if self.preference_direction > 0:
-            # Prefer higher values (Equation 2)
-            r_base[below_range] = 0.5 * torch.exp(-(c_low - p_x[below_range]) / lambda_decay)
-            r_base[above_range] = torch.exp(-(p_x[above_range] - c_high) / lambda_decay)
-            r_base[in_range] = 0.5 * (p_x[in_range] - c_low) / (c_high - c_low) + 0.5
-            
-        elif self.preference_direction < 0:
-            # Prefer lower values (Equation 6)
-            r_base[below_range] = torch.exp(-(c_low - p_x[below_range]) / lambda_decay)
-            r_base[above_range] = 0.5 * torch.exp(-(p_x[above_range] - c_high) / lambda_decay)
-            r_base[in_range] = -0.5 * (p_x[in_range] - c_low) / (c_high - c_low) + 1.0
-            
-        else:
-            # No preference, just want to be in range (Equation 7)
-            r_base[below_range] = torch.exp(-(c_low - p_x[below_range]) / lambda_decay)
-            r_base[above_range] = torch.exp(-(p_x[above_range] - c_high) / lambda_decay)
-            r_base[in_range] = 1.0
-        return r_base
+        # Compute distance from target
+        distance = torch.abs(p_x - target_csat)
+        
+        # Reward decreases exponentially with distance from target
+        r = torch.exp(-distance / lambda_decay)
+        
+        return r
     
-    def from_label(self, y, already_normalized=False, iteration=0):
+    def from_label(self, y, target_csat, already_normalized=False, iteration=0):
         """
-        Convert oracle labels (ΔG values) to rewards
+        Convert oracle labels (ΔG values) to rewards using per-sample targets
         
         Args:
             y: Oracle predictions (ΔG values)
+            target_csat: Target values for each sample
             already_normalized: Whether y is already normalized
             iteration: Current training iteration
             
@@ -232,21 +207,29 @@ class RangeTargetRewardShaper:
             r: Reward tensor
         """
         y = _safe_tensor(y, self.device).view(-1)
+        target_csat = _safe_tensor(target_csat, self.device).view(-1)
+        
+        # Ensure shapes match
+        if y.shape[0] != target_csat.shape[0]:
+            raise ValueError(f"y and target_csat must have same size. Got {y.shape[0]} vs {target_csat.shape[0]}")
+        
         if not already_normalized:
             # y is in original scale, normalize it
             y_np = y.cpu().numpy() if torch.is_tensor(y) else y
             y_norm = self.dataset.normalize_scores(y_np)
             y = _safe_tensor(y_norm, self.device).view(-1)
-        return self.from_score(y, iteration=iteration)
+        
+        # target_csat is assumed to be already in normalized space
+        return self.from_score(y, target_csat, iteration=iteration)
 
-class RangeTargetProxy:
+class TargetProxy:
     """Proxy with range-based reward shaping (A-GFN style)"""
     def __init__(self, args, model, dataset):
         self.args = args
         self.model = model
         self.dataset = dataset
         self.device = args.device
-        self.shaper = RangeTargetRewardShaper(args, dataset)
+        self.shaper = TargetRewardShaper(args, dataset)
         
         print(f"\nRangeTargetProxy initialized with target range reward shaping")
 
@@ -459,24 +442,10 @@ def get_proxy(args, tokenizer, dataset):
     model = DropoutRegressor(args, tokenizer)
 
     mode = getattr(args, "proxy_mode", "gaussian").lower()
-    proxy = RangeTargetProxy(args, model, dataset)
+    proxy = TargetProxy(args, model, dataset)
 
     # Expose common adapter methods for compatibility
     proxy.score_to_reward = lambda s, std=None, it=0: proxy.shaper.from_score(s, iteration=it)
     proxy.label_to_reward = lambda y, norm=None, it=0: proxy.shaper.from_label(y, already_normalized=norm, iteration=it)
-    
-    print(f"\n{'='*60}")
-    print(f"Proxy Configuration:")
-    print(f"  Mode: {mode}")
-    if mode == "range":
-        print(f"  Target ΔG range: [{args.target_logcdil_low}, {args.target_logcdil_high}]")
-        print(f"  Preference direction: {args.preference_direction}")
-    elif mode == "direct":
-        print(f"  Direct reward mode (scores in [0,1])")
-    else:
-        print(f"  Target ΔG: {args.target_y}")
-    print(f"  Reward exponent: {proxy.shaper.reward_exp}")
-    print(f"  Reward ramping factor: {proxy.shaper.reward_exp_ramping}")
-    print(f"{'='*60}\n")
     
     return proxy
